@@ -309,9 +309,9 @@ export fn kernelMain() callconv(.C) void {
     serialInit();
     clearScreen();
 
-    serialPrint("=== SillyOS v0.5 ===\n");
+    serialPrint("=== SillyOS v0.6 ===\n");
     serialPrint("a from-scratch OS in zig\n");
-    serialPrint("btrfs filesystem planned\n\n");
+    serialPrint("serial output enabled\n\n");
 
     setColor(.light_cyan, .black);
     print("=== SillyOS v0.5 ===\n");

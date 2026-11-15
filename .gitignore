@@ -1,0 +1,10 @@
+.zig-cache/
+zig-out/
+temp/
+*.iso
+iso/boot/sillyos
+*.exe
+*.pdb
+*.lib
+*.obj
+.DS_Store
