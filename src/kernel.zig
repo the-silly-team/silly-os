@@ -1,4 +1,4 @@
-// SillyOS - Kernel with BTRFS, disk I/O, keyboard input, and shell
+// SillyOS - Kernel with keyboard input, serial, VGA, btrfs
 // Written in Zig, booted via multiboot
 
 const std = @import("std");
@@ -12,12 +12,6 @@ const VGA_HEIGHT = 25;
 
 // Serial port (COM1)
 const COM1: u16 = 0x3F8;
-
-// PIC ports
-const PIC1_COMMAND: u16 = 0x20;
-const PIC1_DATA: u16 = 0x21;
-const PIC2_COMMAND: u16 = 0xA0;
-const PIC2_DATA: u16 = 0xA1;
 
 const Color = enum(u8) {
     black = 0,
@@ -47,21 +41,13 @@ var cursor_y: usize = 0;
 var current_fg: Color = .light_green;
 var current_bg: Color = .black;
 
-// Keyboard state
 var shift_pressed: bool = false;
 var caps_lock: bool = false;
 
-// Input buffer for shell
 var input_buffer: [256]u8 = undefined;
 var input_len: usize = 0;
 
-// Timer
 var tick_count: u64 = 0;
-
-// Heap
-var heap_start: usize = 0x1000000;
-var heap_end: usize = 0x2000000;
-var heap_ptr: usize = 0x1000000;
 
 // Port I/O
 fn inb(port: u16) u8 {
@@ -197,12 +183,35 @@ fn scancodeToAscii(scancode: u8) u8 {
     return scancode_map[scancode];
 }
 
-fn kmalloc(size: usize) ?[*]u8 {
-    if (heap_ptr + size > heap_end) return null;
-    const ptr = heap_ptr;
-    heap_ptr += size;
-    heap_ptr = (heap_ptr + 7) & ~@as(usize, 7);
-    return @ptrFromInt(ptr);
+// Keyboard controller initialization
+fn initKeyboard() void {
+    // Wait for input buffer to be empty
+    var timeout: u32 = 100000;
+    while (timeout > 0) : (timeout -= 1) {
+        if (inb(0x64) & 0x02 == 0) break;
+    }
+    // Disable keyboard
+    outb(0x64, 0xAD);
+    // Flush output buffer
+    timeout = 100000;
+    while (timeout > 0) : (timeout -= 1) {
+        if (inb(0x64) & 0x01 == 0) break;
+        _ = inb(0x60);
+    }
+    // Read controller config
+    outb(0x64, 0x20);
+    timeout = 100000;
+    while (timeout > 0 and (inb(0x64) & 0x01 == 0)) : (timeout -= 1) {}
+    var config = inb(0x60);
+    config |= 0x01; // Enable keyboard interrupt
+    config &= ~@as(u8, 0x10); // Enable keyboard
+    // Write controller config
+    outb(0x64, 0x60);
+    timeout = 100000;
+    while (timeout > 0 and (inb(0x64) & 0x02 != 0)) : (timeout -= 1) {}
+    outb(0x60, config);
+    // Enable keyboard
+    outb(0x64, 0xAE);
 }
 
 fn processCommand() void {
@@ -210,10 +219,10 @@ fn processCommand() void {
     const cmd = input_buffer[0..input_len];
 
     if (std.mem.eql(u8, cmd, "help")) {
-        print("\nCommands: help, clear, echo <text>, about, uptime, mem, ls, reboot");
+        print("\nCommands: help, clear, echo <text>, about, uptime, mem, ls, disk, btrfs, reboot");
     } else if (std.mem.eql(u8, cmd, "clear")) {
         clearScreen();
-        print("SillyOS v0.5\n> ");
+        print("SillyOS v0.6\n> ");
     } else if (std.mem.startsWith(u8, cmd, "echo ")) {
         print("\n");
         print(cmd[5..]);
@@ -221,56 +230,26 @@ fn processCommand() void {
         print("\nSillyOS - a from-scratch OS in Zig\n");
         print("Built by the silly team\n");
         print("Kernel: zig, VGA text mode, PS/2 keyboard\n");
-        print("Filesystem: btrfs (coming soon)\n");
+        print("Filesystem: btrfs (reading superblock)\n");
     } else if (std.mem.eql(u8, cmd, "uptime")) {
         print("\nTicks: ");
         var buf: [20]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d}", .{tick_count}) catch "?";
         print(s);
     } else if (std.mem.eql(u8, cmd, "mem")) {
-        print("\nHeap: ");
-        var buf: [40]u8 = undefined;
-        const used = heap_ptr - heap_start;
-        const total = heap_end - heap_start;
-        const s = std.fmt.bufPrint(&buf, "{d}/{d} bytes used", .{ used, total }) catch "?";
-        print(s);
+        print("\nHeap: not yet implemented\n");
     } else if (std.mem.eql(u8, cmd, "ls")) {
-        print("\nFilesystem not yet implemented. Coming soon: btrfs!");
+        print("\nFilesystem not yet mounted. Use 'btrfs' to check disk.");
     } else if (std.mem.eql(u8, cmd, "disk")) {
         print("\nReading disk (ATA PIO)...\n");
-        var buf: [512]u8 = undefined;
+        var buf: [16]u8 = undefined;
         if (disk.readSectors(0, 1, &buf)) {
-            print("Sector 0 read OK. First bytes: ");
-            var i: usize = 0;
-            while (i < 16) : (i += 1) {
-                var hexbuf: [4]u8 = undefined;
-                const h = std.fmt.bufPrint(&hexbuf, "{x:0>2} ", .{buf[i]}) catch "?";
-                print(h);
-            }
-            print("\n");
-            // Check for btrfs superblock at 64KB
-            var sb_buf: [4096]u8 = undefined;
-            if (disk.readSectors(128, 8, &sb_buf)) {
-                const sb = btrfs.readU64(&sb_buf, 0x40); // magic at offset 64
-                if (sb == btrfs.BTRFS_MAGIC) {
-                    print("BTRFS superblock found at 64KB!\n");
-                    const label = sb_buf[0x120..0x220];
-                    print("Label: ");
-                    print(label);
-                    print("\n");
-                } else {
-                    print("No btrfs superblock (magic: ");
-                    var hbuf: [20]u8 = undefined;
-                    const hs = std.fmt.bufPrint(&hbuf, "0x{x}", .{sb}) catch "?";
-                    print(hs);
-                    print(")\n");
-                }
-            } else {
-                print("Failed to read superblock sector.\n");
-            }
+            print("Sector 0 read OK.\n");
         } else {
             print("Disk read failed.\n");
         }
+    } else if (std.mem.eql(u8, cmd, "btrfs")) {
+        btrfsInfo();
     } else if (std.mem.eql(u8, cmd, "reboot")) {
         print("\nRebooting...\n");
         asm volatile ("cli");
@@ -284,6 +263,53 @@ fn processCommand() void {
         print("\nUnknown command: ");
         print(cmd);
         print("\nType 'help' for available commands.");
+    }
+}
+
+
+fn btrfsInfo() void {
+    print("\n--- BTRFS Disk Info ---\n");
+    var sb_buf: [4096]u8 = undefined;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        if (!disk.readSectors(128 + @as(u32, @intCast(i)), 1, @ptrCast(&sb_buf[i * 512]))) {
+            print("Disk read failed at sector ");
+            var buf: [10]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{128 + i}) catch "?";
+            print(s);
+            print("\n");
+            return;
+        }
+    }
+    const magic = btrfs.readU64(&sb_buf, 0x40);
+    print("Magic: ");
+    var hbuf: [20]u8 = undefined;
+    const hs = std.fmt.bufPrint(&hbuf, "0x{x}", .{magic}) catch "?";
+    print(hs);
+    print("\n");
+    if (magic == btrfs.BTRFS_MAGIC) {
+        print("BTRFS filesystem detected!\n");
+        const label = sb_buf[0x120..0x220];
+        var end: usize = 0;
+        while (end < label.len and label[end] != 0) : (end += 1) {}
+        print("Label: ");
+        print(label[0..end]);
+        print("\n");
+        const total_bytes = btrfs.readU64(&sb_buf, 0x50);
+        print("Total bytes: ");
+        var tbuf: [20]u8 = undefined;
+        const ts = std.fmt.bufPrint(&tbuf, "{d}", .{total_bytes}) catch "?";
+        print(ts);
+        print("\n");
+        const sectorsize = btrfs.readU32(&sb_buf, 0x5C);
+        print("Sector size: ");
+        var ssbuf: [10]u8 = undefined;
+        const ss = std.fmt.bufPrint(&ssbuf, "{d}", .{sectorsize}) catch "?";
+        print(ss);
+        print("\n");
+    } else {
+        print("No btrfs superblock found.\n");
+        print("Expected magic: 0x4D5F53665248425F\n");
     }
 }
 
@@ -308,13 +334,14 @@ export fn _start() callconv(.C) void {
 export fn kernelMain() callconv(.C) void {
     serialInit();
     clearScreen();
+    initKeyboard();
 
     serialPrint("=== SillyOS v0.6 ===\n");
     serialPrint("a from-scratch OS in zig\n");
-    serialPrint("serial output enabled\n\n");
+    serialPrint("btrfs filesystem, disk I/O, keyboard\n\n");
 
     setColor(.light_cyan, .black);
-    print("=== SillyOS v0.5 ===\n");
+    print("=== SillyOS v0.6 ===\n");
     setColor(.light_gray, .black);
     print("a from-scratch OS in zig\n");
     print("keyboard input enabled\n");
