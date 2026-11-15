@@ -1,7 +1,9 @@
-// SillyOS - Kernel with IDT, keyboard interrupts, timer, and heap
+// SillyOS - Kernel with BTRFS, disk I/O, keyboard input, and shell
 // Written in Zig, booted via multiboot
 
 const std = @import("std");
+const disk = @import("disk.zig");
+const btrfs = @import("btrfs.zig");
 
 // VGA text mode constants
 const VGA_BUFFER: [*]volatile u16 = @ptrFromInt(0xB8000);
@@ -57,8 +59,8 @@ var input_len: usize = 0;
 var tick_count: u64 = 0;
 
 // Heap
-var heap_start: usize = 0x1000000; // 16MB
-var heap_end: usize = 0x2000000;   // 32MB
+var heap_start: usize = 0x1000000;
+var heap_end: usize = 0x2000000;
 var heap_ptr: usize = 0x1000000;
 
 // Port I/O
@@ -168,79 +170,19 @@ fn backspace() void {
     }
 }
 
-// IDT (Interrupt Descriptor Table)
-const IDTEntry = packed struct {
-    offset_low: u16,
-    selector: u16,
-    ist: u8,
-    type_attr: u8,
-    offset_mid: u16,
-    offset_high: u32,
-    reserved: u32,
-};
-
-var idt: [256]IDTEntry = undefined;
-
-fn setIdtEntry(index: u8, handler: u64, selector: u16, type_attr: u8) void {
-    idt[index] = .{
-        .offset_low = @truncate(handler),
-        .selector = selector,
-        .ist = 0,
-        .type_attr = type_attr,
-        .offset_mid = @truncate(handler >> 16),
-        .offset_high = @truncate(handler >> 32),
-        .reserved = 0,
-    };
-}
-
-fn loadIDT() void {
-    const idt_ptr = struct {
-        limit: u16,
-        base: u64,
-    }{
-        .limit = @sizeOf(@TypeOf(idt)) - 1,
-        .base = @intFromPtr(&idt),
-    };
-
-    asm volatile ("lidt (%[ptr])"
-        :
-        : [ptr] "r" (&idt_ptr),
-    );
-}
-
-// IDT handlers (assembly stubs would go here, but for simplicity we'll use a polling approach)
-// In a real OS, these would be assembly trampolines that call Zig functions
-
-// PIC (Programmable Interrupt Controller) remapping
-fn remapPIC() void {
-    outb(0x20, 0x11);
-    outb(0xA0, 0x11);
-    outb(0x21, 0x20);
-    outb(0xA1, 0x28);
-    outb(0x21, 0x04);
-    outb(0xA1, 0x02);
-    outb(0x21, 0x01);
-    outb(0xA1, 0x01);
-    outb(0x21, 0xFD); // Enable IRQ1 (keyboard)
-    outb(0xA1, 0xFF); // Mask all on slave PIC
-}
-
-// Keyboard scancode to ASCII
-const scancode_map = [_]u8{
-    0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0, 0,
-    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0,
-    'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\',
-    'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ',
-};
-
-const scancode_map_shift = [_]u8{
-    0, 0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', 0, 0,
-    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0,
-    'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|',
-    'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ',
-};
-
 fn scancodeToAscii(scancode: u8) u8 {
+    const scancode_map = [_]u8{
+        0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0, 0,
+        'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0,
+        'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\',
+        'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ',
+    };
+    const scancode_map_shift = [_]u8{
+        0, 0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', 0, 0,
+        'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0,
+        'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|',
+        'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ',
+    };
     if (scancode >= scancode_map.len) return 0;
     if (shift_pressed or caps_lock) {
         const c = scancode_map_shift[scancode];
@@ -255,26 +197,23 @@ fn scancodeToAscii(scancode: u8) u8 {
     return scancode_map[scancode];
 }
 
-// Heap allocator (bump allocator)
 fn kmalloc(size: usize) ?[*]u8 {
     if (heap_ptr + size > heap_end) return null;
     const ptr = heap_ptr;
     heap_ptr += size;
-    // align to 8 bytes
     heap_ptr = (heap_ptr + 7) & ~@as(usize, 7);
     return @ptrFromInt(ptr);
 }
 
-// Shell command processing
 fn processCommand() void {
     input_buffer[input_len] = 0;
     const cmd = input_buffer[0..input_len];
 
     if (std.mem.eql(u8, cmd, "help")) {
-        print("\nCommands: help, clear, echo <text>, about, uptime, mem, reboot");
+        print("\nCommands: help, clear, echo <text>, about, uptime, mem, ls, reboot");
     } else if (std.mem.eql(u8, cmd, "clear")) {
         clearScreen();
-        print("SillyOS v0.4\n> ");
+        print("SillyOS v0.5\n> ");
     } else if (std.mem.startsWith(u8, cmd, "echo ")) {
         print("\n");
         print(cmd[5..]);
@@ -282,9 +221,9 @@ fn processCommand() void {
         print("\nSillyOS - a from-scratch OS in Zig\n");
         print("Built by the silly team\n");
         print("Kernel: zig, VGA text mode, PS/2 keyboard\n");
+        print("Filesystem: btrfs (coming soon)\n");
     } else if (std.mem.eql(u8, cmd, "uptime")) {
         print("\nTicks: ");
-        // print tick count
         var buf: [20]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d}", .{tick_count}) catch "?";
         print(s);
@@ -295,6 +234,43 @@ fn processCommand() void {
         const total = heap_end - heap_start;
         const s = std.fmt.bufPrint(&buf, "{d}/{d} bytes used", .{ used, total }) catch "?";
         print(s);
+    } else if (std.mem.eql(u8, cmd, "ls")) {
+        print("\nFilesystem not yet implemented. Coming soon: btrfs!");
+    } else if (std.mem.eql(u8, cmd, "disk")) {
+        print("\nReading disk (ATA PIO)...\n");
+        var buf: [512]u8 = undefined;
+        if (disk.readSectors(0, 1, &buf)) {
+            print("Sector 0 read OK. First bytes: ");
+            var i: usize = 0;
+            while (i < 16) : (i += 1) {
+                var hexbuf: [4]u8 = undefined;
+                const h = std.fmt.bufPrint(&hexbuf, "{x:0>2} ", .{buf[i]}) catch "?";
+                print(h);
+            }
+            print("\n");
+            // Check for btrfs superblock at 64KB
+            var sb_buf: [4096]u8 = undefined;
+            if (disk.readSectors(128, 8, &sb_buf)) {
+                const sb = btrfs.readU64(&sb_buf, 0x40); // magic at offset 64
+                if (sb == btrfs.BTRFS_MAGIC) {
+                    print("BTRFS superblock found at 64KB!\n");
+                    const label = sb_buf[0x120..0x220];
+                    print("Label: ");
+                    print(label);
+                    print("\n");
+                } else {
+                    print("No btrfs superblock (magic: ");
+                    var hbuf: [20]u8 = undefined;
+                    const hs = std.fmt.bufPrint(&hbuf, "0x{x}", .{sb}) catch "?";
+                    print(hs);
+                    print(")\n");
+                }
+            } else {
+                print("Failed to read superblock sector.\n");
+            }
+        } else {
+            print("Disk read failed.\n");
+        }
     } else if (std.mem.eql(u8, cmd, "reboot")) {
         print("\nRebooting...\n");
         asm volatile ("cli");
@@ -333,12 +309,12 @@ export fn kernelMain() callconv(.C) void {
     serialInit();
     clearScreen();
 
-    serialPrint("=== SillyOS v0.4 ===\n");
+    serialPrint("=== SillyOS v0.5 ===\n");
     serialPrint("a from-scratch OS in zig\n");
-    serialPrint("keyboard input, timer, heap allocator\n\n");
+    serialPrint("btrfs filesystem planned\n\n");
 
     setColor(.light_cyan, .black);
-    print("=== SillyOS v0.4 ===\n");
+    print("=== SillyOS v0.5 ===\n");
     setColor(.light_gray, .black);
     print("a from-scratch OS in zig\n");
     print("keyboard input enabled\n");
@@ -384,7 +360,6 @@ export fn kernelMain() callconv(.C) void {
                 }
             }
         }
-        // Increment tick count (simple timer)
         tick_count += 1;
         asm volatile ("hlt");
     }
