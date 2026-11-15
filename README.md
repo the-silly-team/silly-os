@@ -1,19 +1,22 @@
-# sillyos
+# 🧠 SILLYOS 🧠
 
-a from-scratch operating system in zig. actually useful.
+## A FROM-SCRATCH OPERATING SYSTEM IN ZIG. ACTUALLY USEFUL. (PROBABLY.)
 
-built by the silly team.
+built by the silly team. we are silly. the bread foundation does not exist here.
 
-## status
+## STATUS
 
-early development. currently implements:
+🚧 **EXTREMELY EARLY** 🚧
+
+currently implements:
 - multiboot header (boots via grub)
 - vga text mode (80x25, 16 colors)
 - kernel entry point in zig
 - clear screen + print text
 - basic cursor management
+- a window that says hello (wait that's the engine)
 
-## building
+## BUILDING
 
 requires [zig 0.13.0+](https://ziglang.org/download/) and grub-mkrescue (for ISO)
 
@@ -22,7 +25,7 @@ zig build          # build kernel
 zig build iso      # build bootable ISO (requires grub-mkrescue)
 ```
 
-## running
+## RUNNING
 
 ```sh
 # with qemu
@@ -32,7 +35,7 @@ qemu-system-x86_64 -cdrom sillyos.iso
 qemu-system-x86_64 -kernel zig-out/bin/sillyos
 ```
 
-## roadmap
+## ROADMAP
 
 - [x] multiboot header
 - [x] vga text mode
@@ -46,14 +49,15 @@ qemu-system-x86_64 -kernel zig-out/bin/sillyos
 - [ ] network (e1000 or rtl8139)
 - [ ] gui (framebuffer)
 - [ ] silly browser integration
+- [ ] silly engine integration
 
-## why zig?
+## WHY ZIG?
 
 because it sounds silly. and we are all about silly.
 
 also it's fast, memory-safe, has great c interop, and doesn't have a garbage collector. perfect for an operating system.
 
-## license
+## LICENSE
 
 mit
 
@@ -62,4 +66,5 @@ mit
   <p>
     <a href="https://github.com/the-silly-team">github.com/the-silly-team</a>
   </p>
+  <p><sub>we are silly. the bread foundation does not exist here.</sub></p>
 </div>
